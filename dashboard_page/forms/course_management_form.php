@@ -1,118 +1,101 @@
 <?php
-// Include the database configuration file
-// Assumes $conn is a PDO connection object
-include_once('../../config.php'); 
+include_once('../../config.php');
 
-// Default response if nothing succeeds
+// Set content type for JSON response
+header('Content-Type: application/json');
+
+// Default response
 $response = ['response' => 'error'];
 
-// Exit early if 'action' is not set in POST
+// Check if action is set
 if (!isset($_POST['action'])) {
     echo json_encode($response);
     exit;
 }
 
-// Get the action from POST
 $action = $_POST['action'];
 
 try {
-    // ---------- REGISTER NEW PROGRAM ----------
     if ($action == 'register-new-program') {
-        // Trim whitespace from input
         $program_name = trim($_POST['program_name']);
         
-        // Prepare the SQL statement with a named placeholder
-        $stmt = $conn->prepare("INSERT INTO programs (program_name) VALUES (:program_name)");
+        // Validate input
+        if (empty($program_name)) {
+            $response['message'] = 'Program name is required';
+            echo json_encode($response);
+            exit;
+        }
         
-        // Execute the statement with bound parameter
+        $stmt = $conn->prepare("INSERT INTO `programs` (program_name) VALUES (:program_name)");
+        
         if ($stmt->execute([':program_name' => $program_name])) {
             $response['response'] = 'success';
+            $response['message'] = 'Program added successfully';
         }
 
-    // ---------- REGISTER NEW DEPARTMENT ----------
     } elseif ($action == 'register-new-department') {
         $department_name = trim($_POST['department_name']);
-        $department_code = strtoupper(trim($_POST['department_code'])); // force uppercase
-
-        // Prepare the insert statement with named placeholders
-        $stmt = $conn->prepare(
-            "INSERT INTO department (department_name, department_code) 
-             VALUES (:department_name, :department_code)"
-        );
-
-        // Execute with bound parameters
+        $department_code = strtoupper(trim($_POST['department_code']));
+        
+        // Validate inputs
+        if (empty($department_name) || empty($department_code)) {
+            $response['message'] = 'Department name and code are required';
+            echo json_encode($response);
+            exit;
+        }
+        
+        $stmt = $conn->prepare("INSERT INTO `department` (department_name, department_code) VALUES (:department_name, :department_code)");
+        
         if ($stmt->execute([
             ':department_name' => $department_name,
             ':department_code' => $department_code
         ])) {
             $response['response'] = 'success';
+            $response['message'] = 'Department added successfully';
         }
 
-    // ---------- REGISTER NEW COURSE ----------
     } elseif ($action == 'register-new-course') {
-        // Trim and sanitize all POST data
-        $course_program    = trim($_POST['course_program']);
-        $course_name       = trim($_POST['course_name']);
-        $course_code       = strtoupper(trim($_POST['course_code'])); // force uppercase
+        $course_program = trim($_POST['course_program']);
+        $course_name = trim($_POST['course_name']);
+        $course_code = strtoupper(trim($_POST['course_code']));
         $course_department = trim($_POST['course_department']);
-        $course_batches    = trim($_POST['course_batches']);
-        $course_semester   = trim($_POST['course_semester']);
-        $course_students   = trim($_POST['course_students']);
-
-        // Prepare the SQL statement with named placeholders
-        $stmt = $conn->prepare(
-            "INSERT INTO courses 
-                (program_name, course_name, course_code, department_code, course_semester, course_seats, course_batch)
-             VALUES 
-                (:program_name, :course_name, :course_code, :department_code, :course_semester, :course_seats, :course_batch)"
-        );
-
-        // Array of parameters to bind to the statement
-        $params = [
-            ':program_name'    => $course_program,
-            ':course_name'     => $course_name,
-            ':course_code'     => $course_code,
+        $course_batches = trim($_POST['course_batches']);
+        $course_semester = trim($_POST['course_semester']);
+        $course_students = trim($_POST['course_students']);
+        
+        // Validate all required fields
+        if (empty($course_program) || empty($course_name) || empty($course_code) || 
+            empty($course_department) || empty($course_batches) || empty($course_semester)) {
+            $response['message'] = 'All fields are required';
+            echo json_encode($response);
+            exit;
+        }
+        
+        $stmt = $conn->prepare("INSERT INTO `courses` 
+            (program_name, course_name, course_code, department_code, course_semester, course_seats, course_batch) 
+            VALUES 
+            (:program_name, :course_name, :course_code, :department_code, :course_semester, :course_seats, :course_batch)");
+        
+        if ($stmt->execute([
+            ':program_name' => $course_program,
+            ':course_name' => $course_name,
+            ':course_code' => $course_code,
             ':department_code' => $course_department,
             ':course_semester' => $course_semester,
-            ':course_seats'    => $course_students,
-            ':course_batch'    => $course_batches
-        ];
-
-        // Execute the insert statement
-        if ($stmt->execute($params)) {
+            ':course_seats' => $course_students,
+            ':course_batch' => $course_batches
+        ])) {
             $response['response'] = 'success';
+            $response['message'] = 'Course added successfully';
         }
+
+    } else {
+        $response['message'] = 'Invalid action';
     }
 
 } catch (PDOException $e) {
-    // Catch any PDO/database errors
-    $response['response'] = 'error';
-    $response['message'] = $e->getMessage(); // optional, useful for debugging
+    $response['message'] = 'Database error: ' . $e->getMessage();
 }
 
-
-// Return JSON response
 echo json_encode($response);
-
-
-// Fetch Programs
-try {
-    $stmt = $conn->prepare("SELECT * FROM programs ORDER BY program_name ASC");
-    $stmt->execute();
-    $programs = $stmt->fetchAll(PDO::FETCH_ASSOC);
-} catch (PDOException $e) {
-    echo "<p>Error fetching programs: " . $e->getMessage() . "</p>";
-    $programs = [];
-}
 ?>
-
-<h3>Programs</h3>
-<?php if (!empty($programs)): ?>
-    <ul>
-        <?php foreach ($programs as $p): ?>
-            <li><?php echo htmlspecialchars($p['program_name']); ?></li>
-        <?php endforeach; ?>
-    </ul>
-<?php else: ?>
-    <p>No programs available.</p>
-<?php endif; ?>
