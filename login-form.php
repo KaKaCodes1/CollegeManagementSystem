@@ -141,10 +141,10 @@ function sanitizeInput($data) {
 
 // Main login processing
 if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !isset($_POST['login-submit'])) {
+    error_log("Login form not submitted properly");
     header('Location: index.php');
     exit;
 }
-
 
 // Sanitize inputs
 $LoginEmail = sanitizeInput($_POST['login-email']);
@@ -153,11 +153,13 @@ $LoginRole = sanitizeInput($_POST['login-role']);
 
 // Validate inputs
 if (empty($LoginEmail) || empty($LoginPassword) || empty($LoginRole)) {
+    error_log("Login failed: Empty fields");
     header('Location: index.php?login-error=empty');
     exit;
 }
 
 if (!isValidEmail($LoginEmail)) {
+    error_log("Login failed: Invalid email format - " . $LoginEmail);
     header('Location: index.php?login-error=email');
     exit;
 }
@@ -171,6 +173,7 @@ $allowedRoles = [
 ];
 
 if (!isset($allowedRoles[$LoginRole])) {
+    error_log("Login failed: Invalid role - " . $LoginRole);
     writeLoginLog($conn, $LoginEmail, 'invalid_role', 'Failed - Invalid Role');
     header('Location: index.php?login-error=role');
     exit;
@@ -179,14 +182,18 @@ if (!isset($allowedRoles[$LoginRole])) {
 $LoginTable = $allowedRoles[$LoginRole];
 $hashedPassword = md5($LoginPassword); // Using MD5 to match your existing system
 
+error_log("Attempting login for: " . $LoginEmail . " with role: " . $LoginRole);
+
 try {
     // Prepare query based on role
     if ($LoginRole === 'principal' || $LoginRole === 'manager') {
         $query = "SELECT * FROM `$LoginTable` WHERE email = ? AND role = ?";
         $params = [$LoginEmail, $LoginRole];
+        error_log("Query for principal/manager: " . $query . " with params: " . implode(', ', $params));
     } else {
         $query = "SELECT * FROM `$LoginTable` WHERE email = ?";
         $params = [$LoginEmail];
+        error_log("Query for other roles: " . $query . " with param: " . $params[0]);
     }
     
     $stmt = $conn->prepare($query);
@@ -194,14 +201,18 @@ try {
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$user) {
+        error_log("Login failed: User not found - " . $LoginEmail . " in table " . $LoginTable);
         writeLoginLog($conn, $LoginEmail, $LoginRole, 'Failed - User Not Found');
         header('Location: index.php?login-error=user');
         exit;
     }
 
+    error_log("User found: " . print_r($user, true));
+
     // Verify password - using MD5 to match your existing system
     if ($user['password'] !== $hashedPassword) {
         $userid = $user['userid'] ?? $user['email'];
+        error_log("Login failed: Password mismatch for user: " . $userid);
         writeLoginLog($conn, $userid, $LoginRole, 'Failed - Wrong Password');
         header('Location: index.php?login-error=password');
         exit;
@@ -211,17 +222,28 @@ try {
     $userid = $user['userid'] ?? $user['email'];
     $actualRole = $user['role'] ?? $LoginRole;
     
+    error_log("Password verified successfully for user: " . $userid . " with role: " . $actualRole);
+    
+    // Clear any existing MFA session to prevent conflicts
+    if (isset($_SESSION['mfa_pending_user'])) {
+        unset($_SESSION['mfa_pending_user']);
+    }
+    MFAHelper::clearMFASession();
+
     // Generate and store MFA code
     $mfa_code = MFAHelper::generateMFACode();
     MFAHelper::storeMFACode($userid, $mfa_code);
 
+    error_log("MFA code generated: " . $mfa_code . " for user: " . $userid);
+
     // Store user data temporarily for MFA verification
     $_SESSION['mfa_pending_user'] = [
         'userid' => $userid,
-        'name' => $user['name'],
+        'name' => $user['name'] ?? 'Unknown',
         'email' => $user['email'],
         'role' => $actualRole,
-        'login_time' => time()
+        'login_time' => time(),
+        'table_source' => $LoginTable
     ];
 
     // Add role-specific data to pending session
@@ -249,23 +271,37 @@ try {
             break;
     }
 
+    error_log("MFA pending user session created: " . print_r($_SESSION['mfa_pending_user'], true));
+    error_log("MFA session data - code: " . ($_SESSION['mfa_code'] ?? 'NOT SET') . ", expires: " . ($_SESSION['mfa_expires'] ?? 'NOT SET'));
+
     // Log MFA initiation
     writeLoginLog($conn, $userid, $actualRole, 'Success - MFA Initiated');
 
     // Send MFA code via email
-    if (MFAHelper::sendMFACode($user['email'], $mfa_code)) {
+    error_log("Attempting to send MFA email to: " . $user['email']);
+    $email_sent = MFAHelper::sendMFACode($user['email'], $mfa_code);
+    
+    if ($email_sent) {
+        error_log("MFA email sent successfully to: " . $user['email']);
         header('Location: mfa_verify.php');
     } else {
-        // If email fails, log the code for debugging (remove in production)
-        error_log("MFA Code for {$user['email']}: {$mfa_code}");
+        error_log("MFA email failed to send to: " . $user['email']);
+        // If email fails, still redirect to MFA page but log the code for debugging
+        error_log("MFA Code for " . $user['email'] . ": " . $mfa_code);
         header('Location: mfa_verify.php');
     }
     exit;
 
 } catch (PDOException $e) {
     error_log("Login database error: " . $e->getMessage());
+    error_log("Database error details: " . $e->getTraceAsString());
     writeLoginLog($conn, $LoginEmail, $LoginRole, 'Failed - Database Error');
     header('Location: index.php?login-error=database');
     exit;
+} catch (Exception $e) {
+    error_log("General login error: " . $e->getMessage());
+    error_log("Error details: " . $e->getTraceAsString());
+    writeLoginLog($conn, $LoginEmail, $LoginRole, 'Failed - System Error');
+    header('Location: index.php?login-error=system');
+    exit;
 }
-?>

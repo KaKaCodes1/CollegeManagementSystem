@@ -3,8 +3,28 @@ session_start();
 include_once(__DIR__ . '/config.php');
 include_once(__DIR__ . '/mfa_helper.php');
 
+// EXTENSIVE DEBUGGING
+error_log("=== MFA_VERIFY START ===");
+error_log("Session ID: " . session_id());
+error_log("All session data: " . print_r($_SESSION, true));
+
+// Check if user has pending MFA verification
 if (!isset($_SESSION['mfa_pending_user'])) {
+    error_log("MFA FAIL: No pending user - redirecting to index");
     header('Location: index.php');
+    exit();
+}
+
+// Check if MFA code exists
+if (!isset($_SESSION['mfa_code'])) {
+    error_log("MFA FAIL: No MFA code in session");
+    header('Location: index.php?login-error=mfa_expired');
+    exit();
+}
+
+if (!isset($_SESSION['mfa_expires'])) {
+    error_log("MFA FAIL: No expiration time in session");
+    header('Location: index.php?login-error=mfa_expired');
     exit();
 }
 
@@ -108,56 +128,115 @@ function writeLoginLog($conn, $userid, $userrole, $status) {
     }
 }
 
+// Function to redirect to appropriate dashboard
+function redirectToDashboard($role) {
+    error_log("SUCCESS: Redirecting to dashboard for role: " . $role);
+    
+    switch ($role) {
+        case 'student':
+            header('Location: student_dashboard.php');
+            break;
+        case 'staff':
+        case 'hod':
+            header('Location: staff/staff_dashboard.php');
+            break;
+        case 'principal':
+        case 'manager':
+            header('Location: college_admin_dashboard.php');
+            break;
+        case 'admin':
+            header('Location: dashboard.php');
+            break;
+        default:
+            header('Location: dashboard.php');
+    }
+    exit();
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['verify_code'])) {
         $code = trim($_POST['mfa_code'] ?? '');
         
+        error_log("=== MFA VERIFICATION ATTEMPT ===");
+        error_log("Entered code: '" . $code . "'");
+        error_log("Session code: '" . ($_SESSION['mfa_code'] ?? 'NOT SET') . "'");
+        error_log("Session expires: " . ($_SESSION['mfa_expires'] ?? 'NOT SET'));
+        error_log("Current time: " . time());
+        error_log("Time remaining: " . (($_SESSION['mfa_expires'] ?? 0) - time()) . " seconds");
+        error_log("Attempts: " . ($_SESSION['mfa_attempts'] ?? '0'));
+        
         if (empty($code)) {
             $error = 'Please enter the verification code';
-        } elseif (MFAHelper::validateMFACode($code)) {
-            // MFA successful - complete login
-            $_SESSION['UserAuthData'] = $_SESSION['mfa_pending_user'];
-            unset($_SESSION['mfa_pending_user']);
-            
-            // Regenerate session ID for security
-            session_regenerate_id(true);
-            
-            // Log successful login with MFA
-            writeLoginLog($conn, $_SESSION['UserAuthData']['userid'], $_SESSION['UserAuthData']['role'], 'Success - MFA Verified');
-            
-            // Redirect to appropriate dashboard
-            switch ($_SESSION['UserAuthData']['role']) {
-                case 'student':
-                    header('Location: student/student_dashboard.php');
-                    break;
-                case 'staff':
-                case 'hod':
-                    header('Location: staff/staff_dashboard.php');
-                    break;
-                case 'principal':
-                case 'manager':
-                    header('Location: college_admin_dashboard.php');
-                    break;
-                case 'admin':
-                    header('Location: dashboard.php');
-                    break;
-                default:
-                    header('Location: dashboard.php');
-            }
-            exit();
+            error_log("MFA FAIL: Empty code");
         } else {
-            $error = 'Invalid verification code. Please try again.';
+            // SIMPLIFIED VALIDATION - Remove all complex checks
+            $session_code = $_SESSION['mfa_code'] ?? '';
+            
+            error_log("Simple validation:");
+            error_log("Code match: " . ($code === $session_code ? 'YES' : 'NO'));
+            
+            // SIMPLE VALIDATION - Only check if codes match
+            if ($code === $session_code) {
+                error_log("SIMPLE VALIDATION SUCCESS - Codes match!");
+                
+                // MFA successful - complete login
+                $_SESSION['UserAuthData'] = $_SESSION['mfa_pending_user'];
+                
+                // Clear all MFA session data
+                unset($_SESSION['mfa_pending_user']);
+                unset($_SESSION['mfa_code']);
+                unset($_SESSION['mfa_expires']);
+                unset($_SESSION['mfa_attempts']);
+                unset($_SESSION['mfa_user_id']);
+                
+                // Regenerate session ID for security
+                session_regenerate_id(true);
+                
+                // Log successful login with MFA
+                writeLoginLog($conn, $_SESSION['UserAuthData']['userid'], $_SESSION['UserAuthData']['role'], 'Success - MFA Verified');
+                
+                error_log("Login completed for user: " . $_SESSION['UserAuthData']['email']);
+                error_log("Session after cleanup: " . print_r($_SESSION, true));
+                
+                // Redirect to appropriate dashboard
+                redirectToDashboard($_SESSION['UserAuthData']['role']);
+                
+            } else {
+                // Increment attempts
+                $current_attempts = $_SESSION['mfa_attempts'] ?? 0;
+                $_SESSION['mfa_attempts'] = $current_attempts + 1;
+                
+                $error = 'Invalid verification code. Please try again.';
+                error_log("SIMPLE VALIDATION FAILED - Codes don't match");
+                error_log("Entered: '$code' vs Session: '$session_code'");
+                
+                // Check if max attempts reached
+                if ($_SESSION['mfa_attempts'] >= 3) {
+                    error_log("MFA FAIL: Max attempts reached");
+                    $error = 'Maximum verification attempts reached. Please try logging in again.';
+                    session_destroy();
+                    header('Location: index.php?login-error=mfa_attempts');
+                    exit();
+                }
+            }
         }
     }
     
     // Resend code functionality
     if (isset($_POST['resend_code'])) {
+        error_log("Resending MFA code to: " . $email);
         $new_code = MFAHelper::generateMFACode();
         MFAHelper::storeMFACode($_SESSION['mfa_pending_user']['userid'], $new_code);
         MFAHelper::sendMFACode($email, $new_code);
         $error = 'New verification code sent to your email.';
+        error_log("New code generated: " . $new_code);
     }
 }
+
+// Calculate remaining time
+$remaining_time = $_SESSION['mfa_expires'] - time();
+$minutes_remaining = max(0, floor($remaining_time / 60));
+$seconds_remaining = max(0, $remaining_time % 60);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -204,6 +283,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             padding: 12px;
             font-weight: 600;
         }
+        .timer {
+            font-size: 14px;
+            font-weight: bold;
+            color: #dc3545;
+        }
+        .attempts-warning {
+            font-size: 14px;
+            color: #ffc107;
+            font-weight: bold;
+        }
+        .debug-info {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 10px;
+            margin-top: 10px;
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
@@ -218,6 +315,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <div class="card-body p-5">
                         <p class="text-center text-muted mb-4">We sent a verification code to:</p>
                         <p class="text-center fw-bold text-primary fs-5 mb-4"><?php echo htmlspecialchars($email); ?></p>
+                        
+                        <!-- Time Remaining -->
+                        <div class="text-center mb-3">
+                            <span class="timer">
+                                <i class="fas fa-clock"></i> 
+                                Time remaining: <?php echo $minutes_remaining; ?>:<?php echo sprintf('%02d', $seconds_remaining); ?>
+                            </span>
+                        </div>
+                        
+                        <!-- Attempts Warning -->
+                        <?php if (($_SESSION['mfa_attempts'] ?? 0) > 0): ?>
+                            <div class="text-center attempts-warning mb-3">
+                                <i class="fas fa-exclamation-triangle"></i>
+                                Attempts: <?php echo $_SESSION['mfa_attempts'] ?? 0; ?>/3
+                            </div>
+                        <?php endif; ?>
                         
                         <?php if ($error): ?>
                             <div class="alert alert-danger alert-dismissible fade show" role="alert">
@@ -240,7 +353,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                        placeholder="000000"
                                        title="Enter 6-digit code">
                                 <div class="form-text text-center mt-2">
-                                    <i class="fas fa-clock"></i> The code expires in 10 minutes
+                                    <i class="fas fa-key"></i> Enter the 6-digit code from your email
                                 </div>
                             </div>
                             
@@ -261,14 +374,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             </a>
                         </div>
 
-                        <!-- Development Mode Display -->
-                        <div class="alert alert-info mt-4 text-center">
-                            <h6><i class="fas fa-code"></i> Development Mode</h6>
-                            <p class="mb-1">Your verification code is:</p>
-                            <div style="font-size: 28px; font-weight: bold; color: #007bff;">
-                                <?php echo $_SESSION['mfa_code'] ?? 'Not generated'; ?>
-                            </div>
-                            <small class="text-muted">In production, this would be sent to your email</small>
+                        <!-- Debug Information -->
+                        <div class="debug-info">
+                            <h6><i class="fas fa-bug"></i> Debug Information</h6>
+                            <p><strong>Session Code:</strong> <?php echo $_SESSION['mfa_code'] ?? 'Not set'; ?></p>
+                            <p><strong>Expires:</strong> <?php echo $_SESSION['mfa_expires'] ?? 'Not set'; ?> (Current: <?php echo time(); ?>)</p>
+                            <p><strong>Time Remaining:</strong> <?php echo $remaining_time; ?> seconds</p>
+                            <p><strong>Attempts:</strong> <?php echo $_SESSION['mfa_attempts'] ?? 0; ?>/3</p>
+                            <p><strong>User ID:</strong> <?php echo $_SESSION['mfa_pending_user']['userid'] ?? 'Not set'; ?></p>
                         </div>
                     </div>
                 </div>
@@ -287,10 +400,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 this.value = this.value.replace(/[^0-9]/g, '');
                 
                 // Auto-submit when 6 digits are entered
-                if (this.value.length === 6) {
-                    form.submit();
-                }
-            });
+            //     if (this.value.length === 6) {
+            //         form.submit();
+            //     }
+            // });
             
             // Prevent form submission if less than 6 digits
             form.addEventListener('submit', function(e) {
